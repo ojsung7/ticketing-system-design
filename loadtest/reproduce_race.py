@@ -18,13 +18,14 @@ import asyncio
 
 import httpx
 
-BASE_URL = "http://localhost:8000"
+QUEUE_URL = "http://localhost:8001"
+BOOKING_URL = "http://localhost:8002"
 
 
 async def get_entry_token(client: httpx.AsyncClient, user_id: int) -> str | None:
-    """대기열 진입 -> 순번 확인 -> 진입 토큰 획득."""
-    await client.post(f"{BASE_URL}/queue/enter", json={"user_id": user_id})
-    r = await client.get(f"{BASE_URL}/queue/status", params={"user_id": user_id})
+    """queue-service 대기열 진입 -> 순번 확인 -> 진입 토큰 획득."""
+    await client.post(f"{QUEUE_URL}/queue/enter", json={"user_id": user_id})
+    r = await client.get(f"{QUEUE_URL}/queue/status", params={"user_id": user_id})
     return r.json().get("entry_token")
 
 
@@ -32,7 +33,7 @@ async def reserve(client: httpx.AsyncClient, seat_id: int, user_id: int):
     try:
         token = await get_entry_token(client, user_id)
         resp = await client.post(
-            f"{BASE_URL}/seats/{seat_id}/reserve",
+            f"{BOOKING_URL}/seats/{seat_id}/reserve",
             json={"user_id": user_id},
             headers={"Authorization": f"Bearer {token}"},
             timeout=10.0,
@@ -47,8 +48,8 @@ async def main(seat_id: int, concurrency: int):
         tasks = [reserve(client, seat_id, uid) for uid in range(1, concurrency + 1)]
         results = await asyncio.gather(*tasks)
 
-        # 검증용 조회
-        r = await client.get(f"{BASE_URL}/seats/{seat_id}/bookings")
+        # 검증용 조회 (booking-service)
+        r = await client.get(f"{BOOKING_URL}/seats/{seat_id}/bookings")
         booked = r.json()
 
     ok = sum(1 for s in results if s == 200)

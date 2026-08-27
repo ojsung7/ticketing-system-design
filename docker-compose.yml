@@ -26,30 +26,64 @@ services:
       timeout: 3s
       retries: 5
 
-  api:
-    build: .
+  # ── 대기열 서비스 (Redis 만) ─────────────────────────────
+  queue:
+    build:
+      context: .
+      dockerfile: services/queue/Dockerfile
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-dev-shared-secret}
+      ALLOWED_ENTRY_COUNT: ${ALLOWED_ENTRY_COUNT:-100}
+    ports:
+      - "8001:8001"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ── 예매 서비스 (Redis + Postgres 소유) ──────────────────
+  booking:
+    build:
+      context: .
+      dockerfile: services/booking/Dockerfile
     environment:
       DATABASE_URL: postgresql://ticketing:ticketing@postgres:5432/ticketing
       REDIS_URL: redis://redis:6379/0
-      # 대기열 입장 인원(부하 비교용). 매우 크게 주면 '대기열 없음'과 동일.
-      ALLOWED_ENTRY_COUNT: ${ALLOWED_ENTRY_COUNT:-100}
+      JWT_SECRET: ${JWT_SECRET:-dev-shared-secret}
     ports:
-      - "8000:8000"
+      - "8002:8002"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
 
-  worker:
-    build: .
-    command: ["python", "-m", "app.worker"]
+  # 예매 확정 Worker (booking 이미지 재사용, command 로 구분)
+  booking-worker:
+    build:
+      context: .
+      dockerfile: services/booking/Dockerfile
+    command: ["python", "-m", "services.booking.worker"]
     environment:
       DATABASE_URL: postgresql://ticketing:ticketing@postgres:5432/ticketing
       REDIS_URL: redis://redis:6379/0
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── 결제 서비스 (Redis 만, 확정 이벤트 발행) ──────────────
+  payment:
+    build:
+      context: .
+      dockerfile: services/payment/Dockerfile
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-dev-shared-secret}
+    ports:
+      - "8003:8003"
+    depends_on:
       redis:
         condition: service_healthy
 

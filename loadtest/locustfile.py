@@ -15,7 +15,10 @@
 실행 예:
     # 서버를 원하는 ALLOWED_ENTRY_COUNT 로 먼저 기동한 뒤
     locust -f loadtest/locustfile.py --headless -u 500 -r 100 -t 30s \
-           --host http://localhost:8000 --only-summary
+           --host http://localhost:8001 --only-summary
+
+MSA 구성: queue-service(:8001)에서 대기열/토큰, booking-service(:8002)에서 선점.
+서비스별 포트가 달라 요청은 절대 URL 로 보낸다.
 """
 
 import random
@@ -23,6 +26,8 @@ import random
 from locust import HttpUser, between, task
 
 NUM_SEATS = 1000
+QUEUE_URL = "http://localhost:8001"
+BOOKING_URL = "http://localhost:8002"
 
 
 class TicketingUser(HttpUser):
@@ -34,11 +39,11 @@ class TicketingUser(HttpUser):
     def _get_token(self) -> str | None:
         """대기열 진입 후, 입장 토큰을 받을 때까지 status 를 폴링."""
         self.client.post(
-            "/queue/enter", json={"user_id": self.user_id}, name="queue/enter"
+            f"{QUEUE_URL}/queue/enter", json={"user_id": self.user_id}, name="queue/enter"
         )
         for _ in range(50):  # 최대 50회 폴링
             r = self.client.get(
-                f"/queue/status?user_id={self.user_id}", name="queue/status"
+                f"{QUEUE_URL}/queue/status?user_id={self.user_id}", name="queue/status"
             )
             data = r.json()
             if data.get("status") == "admitted":
@@ -56,7 +61,7 @@ class TicketingUser(HttpUser):
             return
         seat_id = random.randint(1, NUM_SEATS)
         with self.client.post(
-            f"/seats/{seat_id}/reserve",
+            f"{BOOKING_URL}/seats/{seat_id}/reserve",
             json={"user_id": self.user_id},
             headers={"Authorization": f"Bearer {token}"},
             name="reserve",
