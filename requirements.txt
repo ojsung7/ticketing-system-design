@@ -1,0 +1,8 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+asyncpg==0.29.0
+redis==5.0.8
+pydantic==2.9.2
+pydantic-settings==2.5.2
+python-jose[cryptography]==3.3.0
+locust==2.31.5

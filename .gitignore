@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Env
+.env
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+
+# Test / load test artifacts
+.pytest_cache/
+locust_report*.html
+*.log
