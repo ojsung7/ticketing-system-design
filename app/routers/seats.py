@@ -79,3 +79,17 @@ async def reserve_seat(seat_id: int, req: ReserveRequest):
         "UPDATE seats SET status = 'reserved' WHERE id = $1", seat_id
     )
     return {"seat_id": seat_id, "user_id": req.user_id, "status": "reserved"}
+
+
+@router.get("/seats/{seat_id}/bookings")
+async def seat_bookings(seat_id: int):
+    """검증용 — 해당 좌석에 실제로 몇 건의 예매가 쌓였는지 조회.
+
+    race condition 이 발생하면 count 가 2 이상으로 찍힌다(중복 예매).
+    """
+    pool = get_db()
+    rows = await pool.fetch(
+        "SELECT id, user_id, booked_at FROM bookings WHERE seat_id = $1 ORDER BY id",
+        seat_id,
+    )
+    return {"seat_id": seat_id, "count": len(rows), "bookings": [dict(r) for r in rows]}

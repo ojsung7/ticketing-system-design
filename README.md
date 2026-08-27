@@ -66,16 +66,21 @@ docker-compose up --build
 > Phase 1 진행 중. "대기열 없음 vs 있음", "DB 트랜잭션 vs Redis 락" 비교 수치를
 > 여기에 표/그래프로 채워나갈 예정.
 
-| 시나리오 | TPS | 에러율 | 평균 응답시간 | 중복 예매 발생 |
+**좌석 1석에 동시 예매 요청 30건**을 쏜 결과 (`loadtest/reproduce_race.py`):
+
+| 시나리오 | 200 성공 | 409 거절 | 실제 예매된 건수 | 중복 예매 |
 |---|---|---|---|---|
-| DB 트랜잭션만 (락 없음) | - | - | - | - |
-| Redis Lua script 락 | - | - | - | - |
+| DB 조회+삽입만 (락 없음) | **28** | 2 | **28** | ❌ 발생 (28중복) |
+| Redis Lua script 락 | _다음 커밋에서 측정_ | | | |
+
+> 락이 없으면 30개 요청 중 28개가 동시에 `available` 을 보고 통과해 한 좌석이
+> 28번 예매됐다. → Redis 원자적 락으로 해결 예정.
 
 ## Phase별 진행 상황
 
 - [ ] **Phase 1: MVP** (진행 중)
   - [x] 프로젝트 초기 세팅 (FastAPI + Redis + Postgres + Docker Compose)
-  - [ ] 좌석 선점 API (DB 트랜잭션만 → race condition 재현)
+  - [x] 좌석 선점 API (DB 트랜잭션만 → race condition 재현) ✅ 28중복 재현
   - [ ] Redis Lua script 락으로 원자성 보장
   - [ ] 결제 확정 비동기 큐(Redis Stream) + Worker
   - [ ] 대기열(Sorted Set) + TTL JWT
@@ -89,4 +94,16 @@ docker-compose up --build
 
 > 겪은 문제와 해결 과정을 시간순으로 기록한다. (race condition, 락 경합 등)
 
-- _아직 없음 — 좌석 선점 API 구현 후 race condition 재현부터 기록 시작._
+### #1 좌석 선점 race condition (DB 트랜잭션만 사용)
+
+- **증상**: 좌석 1석에 동시 예매 요청 30건을 보냈더니 28건이 "예매 성공"으로 처리되고,
+  `bookings` 테이블에 같은 좌석 예매 row 가 28개 쌓임.
+- **원인**: 선점 로직이 `SELECT status`(확인) → `INSERT/UPDATE`(반영) 두 단계로 나뉘어
+  있고 그 사이가 원자적이지 않다. 여러 요청이 거의 동시에 들어오면 모두 아직
+  `available` 인 상태를 읽고 통과해버린다(check-then-act race).
+- **재현**: `python loadtest/reproduce_race.py --seat 1 --concurrency 30`
+- **해결(예정/진행)**: 확인과 선점을 하나의 원자적 연산으로 묶어야 한다. RDB 행 잠금
+  (`SELECT ... FOR UPDATE`)으로도 막을 수 있지만, 초당 수만 건이 몰리는 좌석 선점
+  경로에서는 DB 커넥션·락 경합이 병목이 된다. 그래서 실시간 선점은 **Redis + Lua
+  script(단일 스레드에서 원자 실행)**로 앞단에서 처리하고, DB 는 최종 확정만 맡긴다.
+  → 다음 커밋에서 적용.
