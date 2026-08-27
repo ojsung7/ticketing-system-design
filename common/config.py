@@ -1,9 +1,13 @@
+"""서비스 공통 설정.
+
+세 서비스(queue/booking/payment)가 같은 환경변수 규약을 공유한다.
+JWT_SECRET 은 서비스 간 진입 토큰 검증을 위해 반드시 동일한 값을 써야 한다.
+"""
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """환경변수 기반 설정. .env 또는 docker-compose 의 environment 로 주입된다."""
-
     database_url: str = "postgresql://ticketing:ticketing@localhost:5432/ticketing"
     redis_url: str = "redis://localhost:6379/0"
 

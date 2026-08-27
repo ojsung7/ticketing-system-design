@@ -16,41 +16,44 @@ README에 그대로 남기는 것을 목표로 한다.
 
 ## 아키텍처
 
-### 현재 (Phase 1 — MVP)
+### 현재 (Phase 2 — MSA 전환)
+
+3개 독립 서비스로 분리. **진입 토큰(JWT)은 공유 시크릿으로 각 서비스가 검증**하고,
+결제→예매 확정은 **이벤트 기반**(Redis Stream)으로 통신한다. Postgres 는 booking 만 소유.
 
 ```
-                 reserve(선점)         confirm(결제확정)
-client ──────────────┐                      │
-                     ▼                      ▼
-                ┌──────────┐   xadd    ┌──────────────────────┐
-                │ FastAPI  │ ────────► │ Redis                │
-                │  (api)   │           │  - seat:{id} 선점 락   │
-                └──────────┘           │  - booking_confirm_   │
-                                       │    stream (큐)         │
-                                       └──────────┬───────────┘
-                                          xread   │
-                                       ┌──────────▼───────────┐
-                                       │ Worker (별도 프로세스)  │
-                                       │  큐 소비 → DB 최종 반영  │
-                                       └──────────┬───────────┘
-                                                  ▼
-                                       ┌──────────────────────┐
-                                       │ PostgreSQL            │
-                                       │  bookings / seat=sold │
-                                       └──────────────────────┘
+                  ┌──────────────────┐
+        ┌────────►│ queue-service    │  대기열(Sorted Set) + JWT 발급
+        │  enter  │      :8001       │  (Redis 만)
+        │  status └──────────────────┘
+ client │         ┌──────────────────┐         ┌──────────────────┐
+        ├────────►│ booking-service  │◄── 락 ──►│ Redis            │
+        │ reserve │      :8002       │         │ - waiting_queue   │
+        │ (JWT)   └──────────────────┘         │ - seat:{id} 락    │
+        │         ┌──────────────────┐  xadd   │ - booking_confirm │
+        └────────►│ payment-service  │────────►│   _stream         │
+          confirm │      :8003       │         └────────┬─────────┘
+          (JWT)   └──────────────────┘            xread │
+                  ┌──────────────────┐◄────────────────┘
+                  │ booking-worker   │  이벤트 소비 → DB 반영(sold)
+                  └────────┬─────────┘
+                           ▼
+                  ┌──────────────────┐
+                  │ PostgreSQL       │  bookings / seat=sold (booking 소유)
+                  └──────────────────┘
 ```
 
-- **Redis**: 대기열(Sorted Set) + 좌석 선점 락(TTL, source of truth) + 결제 확정 큐(Stream).
-- **Worker**: Stream 을 소비해 DB 에 자기 속도로만 쓰기(백프레셔). 멱등 처리로 재처리 안전.
-- **PostgreSQL**: 최종 확정된 예매(bookings)와 좌석 상태(sold)를 기록하는 영속 저장소.
+- **queue-service** (`:8001`): 대기열 + TTL JWT 발급. Redis 만 사용.
+- **booking-service** (`:8002`): 좌석 조회·선점(Redis 원자 락). Postgres 소유. JWT 필수.
+- **payment-service** (`:8003`): 결제 확정 → `booking_confirm_stream` 이벤트 발행. DB 미접근.
+- **booking-worker**: 확정 이벤트를 소비해 DB 반영(백프레셔·멱등). booking 이미지 재사용.
+- **공유 코드**(`common/`): 설정·Redis/DB 클라이언트·JWT. 서비스 간 토큰 검증은 동일 `JWT_SECRET`.
 
-예매 흐름: `queue/enter`(대기열 진입) → `queue/status`(앞쪽 N명이면 TTL JWT 발급)
-→ `reserve`(토큰 필수, Redis 락 선점) → `confirm`(Stream 적재 후 즉시 202)
-→ `Worker`(비동기로 DB 반영, 좌석 `sold`). **토큰 없이는 reserve/confirm 진입 불가(401).**
+예매 흐름: `queue/enter` → `queue/status`(앞쪽 N명이면 JWT 발급) → **booking** `reserve`(락)
+→ **payment** `payments/confirm`(이벤트 발행, 202) → **booking-worker**(DB 반영, `sold`).
 
 ### 다음 Phase 확장 계획
 
-- Phase 2: 대기열 / 예매 / 결제 서비스를 별도 FastAPI 프로세스로 분리(MSA).
 - Phase 3: Redis Stream → Kafka(파티셔닝·컨슈머 그룹).
 - Phase 4: Docker Compose → Kubernetes(HPA / 스케줄 기반 스케일링) + Nginx Ingress.
 - Phase 5: Prometheus + Grafana 관측성.
@@ -61,9 +64,11 @@ client ──────────────┐                      │
   트랜잭션으로 처리하면 락 경합·커넥션 고갈로 무너진다. 실시간 선점은 Redis가 맡고,
   DB는 "최종 확정 상태"만 자기 속도로 기록한다.
 - **Lua script 원자적 락**: `GET` 후 `SET`을 따로 호출하면 두 요청이 동시에 빈 좌석을
-  보고 둘 다 선점하는 race condition이 생긴다. → *(Phase 1에서 직접 재현 후 해결 예정)*
-- **큐 기반 비동기 확정**: API 서버는 DB에 직접 쓰지 않고 큐에 적재만 한다. 트래픽이 튀어도
-  큐에 쌓였다가 워커가 서서히 처리 → DB는 항상 감당 가능한 속도로만 요청을 받는다.
+  보고 둘 다 선점하는 race condition이 생긴다. → *(Phase 1에서 재현→해결, 아래 부하테스트 참고)*
+- **큐 기반 비동기 확정**: 결제 서비스는 DB에 직접 쓰지 않고 이벤트만 발행한다. 트래픽이 튀어도
+  Stream에 쌓였다가 워커가 서서히 처리 → DB는 항상 감당 가능한 속도로만 요청을 받는다.
+- **서비스 분리 & 데이터 소유권**: booking 만 Postgres 를 소유하고, payment 는 이벤트로
+  확정을 요청한다. 서비스가 DB 를 공유하지 않아 결합도를 낮추고 독립 배포·확장이 가능하다.
 
 ## 실행 방법
 
@@ -71,21 +76,22 @@ client ──────────────┐                      │
 docker-compose up --build
 ```
 
-- API: http://localhost:8000  (Swagger: http://localhost:8000/docs) / Worker 는 함께 기동됨
-- 헬스체크: `GET /health` → DB/Redis 연결 상태 확인
-- 환경변수는 `.env.example` 참고 (좌석 TTL, 대기열 입장 인원, JWT 등)
+- 서비스: queue `:8001`, booking `:8002`, payment `:8003` (+ booking-worker, postgres, redis)
+- Swagger: 각 서비스 `/docs` (예: http://localhost:8002/docs)
+- 헬스체크: `GET :8001/health`, `:8002/health`, `:8003/health`
+- 환경변수는 `.env.example` 참고. `JWT_SECRET` 은 세 서비스가 동일해야 함(compose 에서 공유).
 
-주요 API:
+주요 API (서비스별):
 
-| 메서드 | 경로 | 설명 |
-|---|---|---|
-| POST | `/queue/enter` | 대기열 진입 — `{"user_id":1}` |
-| GET | `/queue/status?user_id=1` | 순번 조회. 입장 가능 시 `entry_token`(TTL JWT) 발급 |
-| GET | `/performances/{id}/seats` | 좌석 목록/상태 조회 |
-| POST | `/seats/{id}/reserve` | 좌석 선점(Redis 원자 락, TTL) — **토큰 필요** |
-| POST | `/seats/{id}/confirm` | 결제 확정(Stream 적재, 즉시 202) — **토큰 필요** |
+| 서비스 | 메서드 | 경로 | 설명 |
+|---|---|---|---|
+| queue `:8001` | POST | `/queue/enter` | 대기열 진입 — `{"user_id":1}` |
+| queue `:8001` | GET | `/queue/status?user_id=1` | 순번 조회. 입장 가능 시 `entry_token` 발급 |
+| booking `:8002` | GET | `/performances/{id}/seats` | 좌석 목록/상태 조회 |
+| booking `:8002` | POST | `/seats/{id}/reserve` | 좌석 선점(Redis 원자 락) — **토큰 필요** |
+| payment `:8003` | POST | `/payments/confirm` | 결제 확정(이벤트 발행, 202) — **토큰 필요**, `{"user_id":1,"seat_id":5}` |
 
-> `reserve`/`confirm` 은 `Authorization: Bearer <entry_token>` 헤더가 있어야 진입 가능(대기열 게이트).
+> `reserve`/`payments/confirm` 은 `Authorization: Bearer <entry_token>` 헤더가 있어야 진입 가능(대기열 게이트).
 
 검증 스크립트:
 
@@ -140,7 +146,10 @@ python loadtest/e2e_booking.py --seat 5 --user 777             # 선점→확정
   - [x] 결제 확정 비동기 큐(Redis Stream) + Worker ✅ 선점/확정 분리, 멱등 반영
   - [x] 대기열(Sorted Set) + TTL JWT ✅ 토큰 없인 reserve/confirm 401 차단
   - [x] 부하테스트 비교 및 결과 기록 ✅ 대기열 backend 부하 절반↓ 확인
-- [ ] Phase 2: MSA 전환
+- [x] **Phase 2: MSA 전환** ✅ 완료
+  - [x] queue / booking / payment 서비스 분리 (독립 FastAPI + Dockerfile)
+  - [x] 공유 시크릿 JWT 로 서비스 간 토큰 검증
+  - [x] payment → booking 확정을 Redis Stream 이벤트로 통신(데이터 소유권 분리)
 - [ ] Phase 3: Kafka
 - [ ] Phase 4: K8s
 - [ ] Phase 5: 관측성

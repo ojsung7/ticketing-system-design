@@ -1,7 +1,7 @@
-"""예매 페이지 진입 토큰(JWT).
+"""예매 진입 토큰(JWT) 발급/검증 — 서비스 공통.
 
-대기열을 통과한 사용자에게만 TTL 이 걸린 JWT 를 발급한다. 이 토큰이 있어야만
-좌석 선점/결제 확정 API 에 진입할 수 있어, 대기열이 실제 트래픽 게이트 역할을 한다.
+queue-service 가 발급하고, booking/payment 서비스가 같은 JWT_SECRET 으로 검증한다.
+이렇게 공유 시크릿 기반 토큰으로 서비스 간 신뢰를 세운다(별도 세션 서버 없이).
 """
 
 from datetime import datetime, timedelta, timezone
@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import Header, HTTPException
 from jose import JWTError, jwt
 
-from app.config import settings
+from common.config import settings
 
 ALGORITHM = "HS256"
 
@@ -25,11 +25,10 @@ def create_entry_token(user_id: int) -> str:
 
 
 async def require_entry_token(authorization: str | None = Header(default=None)) -> int:
-    """Authorization: Bearer <token> 헤더를 검증하고 user_id 를 돌려준다."""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
             status_code=401,
-            detail="예매 진입 토큰이 필요합니다. 먼저 대기열(/queue)을 통과하세요.",
+            detail="예매 진입 토큰이 필요합니다. 먼저 대기열(queue-service)을 통과하세요.",
         )
     token = authorization.split(" ", 1)[1]
     try:
