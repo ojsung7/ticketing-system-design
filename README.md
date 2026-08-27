@@ -40,12 +40,13 @@ client ──────────────┐                      │
                                        └──────────────────────┘
 ```
 
-- **Redis**: 실시간 좌석 선점 락(TTL, source of truth) + 결제 확정 큐(Stream). (대기열 예정)
+- **Redis**: 대기열(Sorted Set) + 좌석 선점 락(TTL, source of truth) + 결제 확정 큐(Stream).
 - **Worker**: Stream 을 소비해 DB 에 자기 속도로만 쓰기(백프레셔). 멱등 처리로 재처리 안전.
 - **PostgreSQL**: 최종 확정된 예매(bookings)와 좌석 상태(sold)를 기록하는 영속 저장소.
 
-예매 흐름: `reserve`(Redis 락으로 선점, DB 안 씀) → `confirm`(Stream 적재 후 즉시 202)
-→ `Worker`(비동기로 DB 반영, 좌석 `sold`).
+예매 흐름: `queue/enter`(대기열 진입) → `queue/status`(앞쪽 N명이면 TTL JWT 발급)
+→ `reserve`(토큰 필수, Redis 락 선점) → `confirm`(Stream 적재 후 즉시 202)
+→ `Worker`(비동기로 DB 반영, 좌석 `sold`). **토큰 없이는 reserve/confirm 진입 불가(401).**
 
 ### 다음 Phase 확장 계획
 
@@ -78,9 +79,13 @@ docker-compose up --build
 
 | 메서드 | 경로 | 설명 |
 |---|---|---|
+| POST | `/queue/enter` | 대기열 진입 — `{"user_id":1}` |
+| GET | `/queue/status?user_id=1` | 순번 조회. 입장 가능 시 `entry_token`(TTL JWT) 발급 |
 | GET | `/performances/{id}/seats` | 좌석 목록/상태 조회 |
-| POST | `/seats/{id}/reserve` | 좌석 선점(Redis 원자 락, TTL) — `{"user_id":1}` |
-| POST | `/seats/{id}/confirm` | 결제 확정(Stream 적재, 즉시 202) — `{"user_id":1}` |
+| POST | `/seats/{id}/reserve` | 좌석 선점(Redis 원자 락, TTL) — **토큰 필요** |
+| POST | `/seats/{id}/confirm` | 결제 확정(Stream 적재, 즉시 202) — **토큰 필요** |
+
+> `reserve`/`confirm` 은 `Authorization: Bearer <entry_token>` 헤더가 있어야 진입 가능(대기열 게이트).
 
 검증 스크립트:
 
@@ -112,7 +117,7 @@ python loadtest/e2e_booking.py --seat 5 --user 777             # 선점→확정
   - [x] 좌석 선점 API (DB 트랜잭션만 → race condition 재현) ✅ 28중복 재현
   - [x] Redis Lua script 락으로 원자성 보장 ✅ 30요청→1성공/29거절
   - [x] 결제 확정 비동기 큐(Redis Stream) + Worker ✅ 선점/확정 분리, 멱등 반영
-  - [ ] 대기열(Sorted Set) + TTL JWT
+  - [x] 대기열(Sorted Set) + TTL JWT ✅ 토큰 없인 reserve/confirm 401 차단
   - [ ] 부하테스트 비교 및 결과 기록
 - [ ] Phase 2: MSA 전환
 - [ ] Phase 3: Kafka

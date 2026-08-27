@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.database import connect, disconnect, get_db, get_redis
-from app.routers import seats
+from app.routers import queue, seats
 
 
 @asynccontextmanager
@@ -15,6 +15,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Ticketing System (Phase 1)", lifespan=lifespan)
 
+app.include_router(queue.router)
 app.include_router(seats.router)
 
 

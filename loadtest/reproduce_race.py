@@ -21,11 +21,20 @@ import httpx
 BASE_URL = "http://localhost:8000"
 
 
+async def get_entry_token(client: httpx.AsyncClient, user_id: int) -> str | None:
+    """대기열 진입 -> 순번 확인 -> 진입 토큰 획득."""
+    await client.post(f"{BASE_URL}/queue/enter", json={"user_id": user_id})
+    r = await client.get(f"{BASE_URL}/queue/status", params={"user_id": user_id})
+    return r.json().get("entry_token")
+
+
 async def reserve(client: httpx.AsyncClient, seat_id: int, user_id: int):
     try:
+        token = await get_entry_token(client, user_id)
         resp = await client.post(
             f"{BASE_URL}/seats/{seat_id}/reserve",
             json={"user_id": user_id},
+            headers={"Authorization": f"Bearer {token}"},
             timeout=10.0,
         )
         return resp.status_code

@@ -6,9 +6,10 @@
 선점에는 TTL 을 걸어 결제가 완료되지 않으면 자동으로 해제되게 한다.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from app.auth import require_entry_token
 from app.config import settings
 from app.database import get_db, get_redis
 
@@ -55,13 +56,19 @@ async def list_seats(performance_id: int):
 
 
 @router.post("/seats/{seat_id}/reserve")
-async def reserve_seat(seat_id: int, req: ReserveRequest):
+async def reserve_seat(
+    seat_id: int,
+    req: ReserveRequest,
+    token_user_id: int = Depends(require_entry_token),
+):
     """좌석 선점 — Redis Lua script 원자적 락 (race condition 해결).
 
+    대기열을 통과한 진입 토큰(JWT)이 있어야 호출할 수 있다.
     1) Lua script 로 `seat:{id}` 키를 원자적으로 선점(GET+SET). 이미 선점돼 있으면 409.
-    2) 선점 성공한 요청만 DB 에 예매 기록/좌석 상태 반영.
-    선점 키에는 TTL(SEAT_LOCK_TTL)을 걸어 결제 미완료 시 자동 해제된다.
+    2) 선점 성공 시 DB 에는 쓰지 않고 hold 상태로 둔다(TTL 자동 해제).
     """
+    if token_user_id != req.user_id:
+        raise HTTPException(status_code=403, detail="토큰의 사용자와 요청 사용자가 다릅니다.")
     redis = get_redis()
     pool = get_db()
 
@@ -93,13 +100,19 @@ async def reserve_seat(seat_id: int, req: ReserveRequest):
 
 
 @router.post("/seats/{seat_id}/confirm", status_code=202)
-async def confirm_seat(seat_id: int, req: ReserveRequest):
+async def confirm_seat(
+    seat_id: int,
+    req: ReserveRequest,
+    token_user_id: int = Depends(require_entry_token),
+):
     """결제 확정 — 큐에 적재만 하고 즉시 응답 (비동기 확정 / 백프레셔).
 
     API 서버는 DB 에 직접 쓰지 않는다. Redis Stream 에 확정 이벤트를 넣고 바로 응답하며,
     실제 DB 반영은 Worker(app/worker.py)가 자기 속도로 소비해서 처리한다.
     트래픽이 순간적으로 튀어도 큐에 쌓였다가 서서히 처리된다.
     """
+    if token_user_id != req.user_id:
+        raise HTTPException(status_code=403, detail="토큰의 사용자와 요청 사용자가 다릅니다.")
     redis = get_redis()
 
     # 이 좌석의 현재 선점자가 요청자 본인인지 확인 (TTL 만료/타인 선점 방어)

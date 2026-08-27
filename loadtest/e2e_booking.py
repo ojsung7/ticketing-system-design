@@ -18,9 +18,20 @@ BASE_URL = "http://localhost:8000"
 
 async def main(seat_id: int, user_id: int):
     async with httpx.AsyncClient(timeout=10.0) as client:
+        # 0) 대기열 통과 -> 진입 토큰 획득
+        await client.post(f"{BASE_URL}/queue/enter", json={"user_id": user_id})
+        st = (
+            await client.get(f"{BASE_URL}/queue/status", params={"user_id": user_id})
+        ).json()
+        token = st.get("entry_token")
+        print(f"0) queue -> {st['status']}, token={'발급됨' if token else '없음'}")
+        headers = {"Authorization": f"Bearer {token}"}
+
         # 1) 선점
         r = await client.post(
-            f"{BASE_URL}/seats/{seat_id}/reserve", json={"user_id": user_id}
+            f"{BASE_URL}/seats/{seat_id}/reserve",
+            json={"user_id": user_id},
+            headers=headers,
         )
         print(f"1) reserve -> {r.status_code} {r.json()}")
         if r.status_code != 200:
@@ -28,7 +39,9 @@ async def main(seat_id: int, user_id: int):
 
         # 2) 결제 확정 (큐 적재만, 즉시 202)
         r = await client.post(
-            f"{BASE_URL}/seats/{seat_id}/confirm", json={"user_id": user_id}
+            f"{BASE_URL}/seats/{seat_id}/confirm",
+            json={"user_id": user_id},
+            headers=headers,
         )
         print(f"2) confirm -> {r.status_code} {r.json()}  (여기서 API 는 DB 를 안 건드림)")
         if r.status_code != 202:
