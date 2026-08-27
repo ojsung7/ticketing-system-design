@@ -22,11 +22,11 @@ CREATE TABLE IF NOT EXISTS bookings (
     booked_at TIMESTAMP NOT NULL DEFAULT now()
 );
 
--- [학습 목적] 원래 여기에 좌석당 1건만 허용하는 unique 인덱스를 두지만,
--- 지금 단계에서는 애플리케이션 레벨의 race condition(확인 후 삽입 경합)을
--- 중복 예매 row 로 '눈에 보이게' 재현하기 위해 일부러 제거해 두었다.
--- Redis Lua script 원자적 락을 도입하는 커밋에서 defense-in-depth 로 복원한다.
--- CREATE UNIQUE INDEX IF NOT EXISTS uq_bookings_seat ON bookings(seat_id);
+-- 좌석당 예매는 1건만 허용 (defense-in-depth).
+-- 실시간 동시성은 앞단의 Redis 원자적 락으로 이미 걸러지지만, 애플리케이션 버그나
+-- 락 우회 상황에 대비한 DB 레벨 최후 방어선으로 unique 제약을 둔다.
+-- (직전 커밋에서는 app 레벨 race condition 을 눈에 보이게 재현하려고 잠시 제거했었다.)
+CREATE UNIQUE INDEX IF NOT EXISTS uq_bookings_seat ON bookings(seat_id);
 
 -- ── 시드 데이터 ────────────────────────────────────────────────
 INSERT INTO performances (name, show_time)

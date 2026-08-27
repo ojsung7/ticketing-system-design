@@ -71,17 +71,18 @@ docker-compose up --build
 | 시나리오 | 200 성공 | 409 거절 | 실제 예매된 건수 | 중복 예매 |
 |---|---|---|---|---|
 | DB 조회+삽입만 (락 없음) | **28** | 2 | **28** | ❌ 발생 (28중복) |
-| Redis Lua script 락 | _다음 커밋에서 측정_ | | | |
+| Redis Lua script 락 | **1** | 29 | **1** | ✅ 없음 |
 
 > 락이 없으면 30개 요청 중 28개가 동시에 `available` 을 보고 통과해 한 좌석이
-> 28번 예매됐다. → Redis 원자적 락으로 해결 예정.
+> 28번 예매됐다. Redis Lua script(단일 스레드 원자 실행) 락 도입 후에는 정확히
+> 1건만 통과하고 나머지 29건은 409 로 깔끔하게 거절된다.
 
 ## Phase별 진행 상황
 
 - [ ] **Phase 1: MVP** (진행 중)
   - [x] 프로젝트 초기 세팅 (FastAPI + Redis + Postgres + Docker Compose)
   - [x] 좌석 선점 API (DB 트랜잭션만 → race condition 재현) ✅ 28중복 재현
-  - [ ] Redis Lua script 락으로 원자성 보장
+  - [x] Redis Lua script 락으로 원자성 보장 ✅ 30요청→1성공/29거절
   - [ ] 결제 확정 비동기 큐(Redis Stream) + Worker
   - [ ] 대기열(Sorted Set) + TTL JWT
   - [ ] 부하테스트 비교 및 결과 기록
@@ -102,8 +103,10 @@ docker-compose up --build
   있고 그 사이가 원자적이지 않다. 여러 요청이 거의 동시에 들어오면 모두 아직
   `available` 인 상태를 읽고 통과해버린다(check-then-act race).
 - **재현**: `python loadtest/reproduce_race.py --seat 1 --concurrency 30`
-- **해결(예정/진행)**: 확인과 선점을 하나의 원자적 연산으로 묶어야 한다. RDB 행 잠금
+- **해결**: 확인과 선점을 하나의 원자적 연산으로 묶어야 한다. RDB 행 잠금
   (`SELECT ... FOR UPDATE`)으로도 막을 수 있지만, 초당 수만 건이 몰리는 좌석 선점
   경로에서는 DB 커넥션·락 경합이 병목이 된다. 그래서 실시간 선점은 **Redis + Lua
   script(단일 스레드에서 원자 실행)**로 앞단에서 처리하고, DB 는 최종 확정만 맡긴다.
-  → 다음 커밋에서 적용.
+  선점 키에는 TTL 을 걸어 결제 미완료 시 자동 해제되게 했다.
+- **결과**: 동일 조건(30 동시 요청)에서 **1건만 성공, 29건 409 거절, 중복 0**.
+  DB 에는 defense-in-depth 로 `bookings(seat_id)` unique 인덱스도 복원해 최후 방어선을 뒀다.
