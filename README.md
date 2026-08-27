@@ -19,20 +19,33 @@ README에 그대로 남기는 것을 목표로 한다.
 ### 현재 (Phase 1 — MVP)
 
 ```
-        ┌──────────┐      ┌─────────┐
-client → │ FastAPI  │ ───→ │  Redis  │  ← 좌석 선점 락(source of truth), 대기열, 큐
-        │  (api)   │      └─────────┘
-        └────┬─────┘            │
-             │            ┌─────┴─────┐
-             │            │  Worker   │  ← 큐 소비 → DB 최종 반영 (예정)
-             ▼            └─────┬─────┘
-        ┌──────────┐           │
-        │ Postgres │ ←─────────┘  ← 확정 상태(sold) 기록
-        └──────────┘
+                 reserve(선점)         confirm(결제확정)
+client ──────────────┐                      │
+                     ▼                      ▼
+                ┌──────────┐   xadd    ┌──────────────────────┐
+                │ FastAPI  │ ────────► │ Redis                │
+                │  (api)   │           │  - seat:{id} 선점 락   │
+                └──────────┘           │  - booking_confirm_   │
+                                       │    stream (큐)         │
+                                       └──────────┬───────────┘
+                                          xread   │
+                                       ┌──────────▼───────────┐
+                                       │ Worker (별도 프로세스)  │
+                                       │  큐 소비 → DB 최종 반영  │
+                                       └──────────┬───────────┘
+                                                  ▼
+                                       ┌──────────────────────┐
+                                       │ PostgreSQL            │
+                                       │  bookings / seat=sold │
+                                       └──────────────────────┘
 ```
 
-- **Redis**: 실시간 좌석 선점 여부의 source of truth, 대기열(Sorted Set), 결제 확정 큐(Stream).
-- **PostgreSQL**: 최종 확정된 예매(bookings)와 좌석 상태를 기록하는 영속 저장소.
+- **Redis**: 실시간 좌석 선점 락(TTL, source of truth) + 결제 확정 큐(Stream). (대기열 예정)
+- **Worker**: Stream 을 소비해 DB 에 자기 속도로만 쓰기(백프레셔). 멱등 처리로 재처리 안전.
+- **PostgreSQL**: 최종 확정된 예매(bookings)와 좌석 상태(sold)를 기록하는 영속 저장소.
+
+예매 흐름: `reserve`(Redis 락으로 선점, DB 안 씀) → `confirm`(Stream 적재 후 즉시 202)
+→ `Worker`(비동기로 DB 반영, 좌석 `sold`).
 
 ### 다음 Phase 확장 계획
 
@@ -57,9 +70,24 @@ client → │ FastAPI  │ ───→ │  Redis  │  ← 좌석 선점 락(
 docker-compose up --build
 ```
 
-- API: http://localhost:8000  (Swagger: http://localhost:8000/docs)
+- API: http://localhost:8000  (Swagger: http://localhost:8000/docs) / Worker 는 함께 기동됨
 - 헬스체크: `GET /health` → DB/Redis 연결 상태 확인
 - 환경변수는 `.env.example` 참고 (좌석 TTL, 대기열 입장 인원, JWT 등)
+
+주요 API:
+
+| 메서드 | 경로 | 설명 |
+|---|---|---|
+| GET | `/performances/{id}/seats` | 좌석 목록/상태 조회 |
+| POST | `/seats/{id}/reserve` | 좌석 선점(Redis 원자 락, TTL) — `{"user_id":1}` |
+| POST | `/seats/{id}/confirm` | 결제 확정(Stream 적재, 즉시 202) — `{"user_id":1}` |
+
+검증 스크립트:
+
+```bash
+python loadtest/reproduce_race.py --seat 10 --concurrency 30   # 동시 선점 → 1건만 성공
+python loadtest/e2e_booking.py --seat 5 --user 777             # 선점→확정→워커 반영 e2e
+```
 
 ## 부하테스트 결과
 
@@ -83,7 +111,7 @@ docker-compose up --build
   - [x] 프로젝트 초기 세팅 (FastAPI + Redis + Postgres + Docker Compose)
   - [x] 좌석 선점 API (DB 트랜잭션만 → race condition 재현) ✅ 28중복 재현
   - [x] Redis Lua script 락으로 원자성 보장 ✅ 30요청→1성공/29거절
-  - [ ] 결제 확정 비동기 큐(Redis Stream) + Worker
+  - [x] 결제 확정 비동기 큐(Redis Stream) + Worker ✅ 선점/확정 분리, 멱등 반영
   - [ ] 대기열(Sorted Set) + TTL JWT
   - [ ] 부하테스트 비교 및 결과 기록
 - [ ] Phase 2: MSA 전환

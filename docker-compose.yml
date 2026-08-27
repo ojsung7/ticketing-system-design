@@ -39,5 +39,17 @@ services:
       redis:
         condition: service_healthy
 
+  worker:
+    build: .
+    command: ["python", "-m", "app.worker"]
+    environment:
+      DATABASE_URL: postgresql://ticketing:ticketing@postgres:5432/ticketing
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
 volumes:
   pgdata:

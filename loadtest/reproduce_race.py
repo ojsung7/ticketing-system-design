@@ -46,17 +46,18 @@ async def main(seat_id: int, concurrency: int):
     conflict = sum(1 for s in results if s == 409)
     other = [s for s in results if s not in (200, 409)]
 
-    print(f"\n=== 좌석 {seat_id} 동시 예매 결과 (동시성 {concurrency}) ===")
-    print(f"  200 성공        : {ok}")
+    print(f"\n=== 좌석 {seat_id} 동시 선점 결과 (동시성 {concurrency}) ===")
+    print(f"  200 선점 성공   : {ok}")
     print(f"  409 이미 선점   : {conflict}")
     if other:
         print(f"  기타 응답       : {other}")
-    print(f"  실제 bookings 수 : {booked['count']}")
+    # reserve 는 이제 '선점(hold)'만 하므로 bookings 는 confirm+worker 후에 쌓인다.
+    print(f"  (참고) bookings : {booked['count']}  ← confirm 전이면 0 이 정상")
 
-    if booked["count"] > 1 or ok > 1:
-        print("\n  ❌ RACE CONDITION 발생! 한 좌석이 중복 예매되었다.")
+    if ok > 1:
+        print("\n  ❌ RACE CONDITION! 한 좌석을 여러 요청이 동시에 선점했다.")
     else:
-        print("\n  ✅ 정상: 한 좌석은 정확히 1건만 예매되었다.")
+        print("\n  ✅ 정상: 동시 요청 중 정확히 1건만 좌석을 선점했다.")
 
 
 if __name__ == "__main__":
