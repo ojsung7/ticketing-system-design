@@ -33,8 +33,9 @@ INSERT INTO performances (name, show_time)
 VALUES ('데모 콘서트 2026', '2026-12-31 20:00:00')
 ON CONFLICT DO NOTHING;
 
--- 공연 1번에 좌석 50개 (A1 ~ A50)
+-- 공연 1번에 좌석 1000개 (A1 ~ A1000). 부하테스트에서 좌석 고갈로 인한
+-- 409 노이즈를 줄이고 backend 처리량/지연을 측정하기 위해 넉넉히 시드한다.
 INSERT INTO seats (performance_id, seat_number, status)
 SELECT 1, 'A' || g, 'available'
-FROM generate_series(1, 50) AS g
+FROM generate_series(1, 1000) AS g
 WHERE NOT EXISTS (SELECT 1 FROM seats WHERE performance_id = 1);

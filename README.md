@@ -96,8 +96,7 @@ python loadtest/e2e_booking.py --seat 5 --user 777             # 선점→확정
 
 ## 부하테스트 결과
 
-> Phase 1 진행 중. "대기열 없음 vs 있음", "DB 트랜잭션 vs Redis 락" 비교 수치를
-> 여기에 표/그래프로 채워나갈 예정.
+### ① 동시성 정확성 — DB 트랜잭션 vs Redis 락
 
 **좌석 1석에 동시 예매 요청 30건**을 쏜 결과 (`loadtest/reproduce_race.py`):
 
@@ -110,15 +109,37 @@ python loadtest/e2e_booking.py --seat 5 --user 777             # 선점→확정
 > 28번 예매됐다. Redis Lua script(단일 스레드 원자 실행) 락 도입 후에는 정확히
 > 1건만 통과하고 나머지 29건은 409 로 깔끔하게 거절된다.
 
+### ② 대기열 효과 — 없음 vs 있음 (Locust, 500 users / 25s)
+
+같은 코드 경로(`queue/enter → queue/status → reserve`)에서 **입장 인원 제한
+(`ALLOWED_ENTRY_COUNT`) 하나만** 바꿔 비교 (`loadtest/locustfile.py`):
+
+| reserve(예매 backend) | 대기열 없음 (allowed=10M) | 대기열 있음 (allowed=50) |
+|---|---|---|
+| 처리율 | 1088 req/s | **524 req/s** (≈ 절반) |
+| 평균 지연 | 125 ms | **74 ms** |
+| p95 지연 | 180 ms | **130 ms** |
+| p99 지연 | 220 ms | **180 ms** |
+| 실패율 | 0% | 0% |
+| 흡수된 폴링(queue/status) | 1093 req/s | **2139 req/s** |
+
+> **대기열이 backend 로 가는 실제 예매 요청률을 절반 이하로 낮추고 지연도 줄였다.**
+> 몰린 트래픽은 DB 를 건드리지 않는 값싼 폴링(Redis `zrank`)으로 흡수된다 —
+> "정직하게 다 받지 말고, 앞단에서 걸러 뒷단이 감당 가능한 속도로 들어오게" 라는
+> 설계 철학이 수치로 확인된다.
+>
+> _측정 환경: 단일 노트북에서 api·worker·postgres·redis·locust 를 함께 구동(CPU
+> bound). 두 시나리오 모두 동일 조건이라 상대 비교에는 유효하다._
+
 ## Phase별 진행 상황
 
-- [ ] **Phase 1: MVP** (진행 중)
+- [x] **Phase 1: MVP** ✅ 완료
   - [x] 프로젝트 초기 세팅 (FastAPI + Redis + Postgres + Docker Compose)
   - [x] 좌석 선점 API (DB 트랜잭션만 → race condition 재현) ✅ 28중복 재현
   - [x] Redis Lua script 락으로 원자성 보장 ✅ 30요청→1성공/29거절
   - [x] 결제 확정 비동기 큐(Redis Stream) + Worker ✅ 선점/확정 분리, 멱등 반영
   - [x] 대기열(Sorted Set) + TTL JWT ✅ 토큰 없인 reserve/confirm 401 차단
-  - [ ] 부하테스트 비교 및 결과 기록
+  - [x] 부하테스트 비교 및 결과 기록 ✅ 대기열 backend 부하 절반↓ 확인
 - [ ] Phase 2: MSA 전환
 - [ ] Phase 3: Kafka
 - [ ] Phase 4: K8s
