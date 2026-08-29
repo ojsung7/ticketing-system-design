@@ -59,9 +59,19 @@ Postgres 는 booking 만 소유.
 예매 흐름: `queue/enter` → `queue/status`(앞쪽 N명이면 JWT 발급) → **booking** `reserve`(락)
 → **payment** `payments/confirm`(Kafka 발행, 202) → **booking-worker**(컨슈머 그룹, DB 반영 `sold`).
 
+### Phase 4 — Kubernetes 배포 설계 (매니페스트)
+
+`docker-compose` 로 실제 동작을 검증한 뒤(Phase 1~3), K8s 배포는 **매니페스트 + 설계
+문서**로 남겼다(`k8s/`). 실무도 트래픽이 커지며 단계적으로 K8s 를 도입하므로, 그 구성을
+그대로 적용 가능한 형태로 설계했다. 자세한 내용은 **[k8s/README.md](k8s/README.md)**.
+
+- Deployment/Service/**HPA**(queue·booking·payment), StatefulSet(postgres·kafka)
+- **Nginx Ingress** 단일 진입점 + IP당 rate limiting
+- **스케줄 기반 스케일링** 우선(CronJob): 티켓 오픈은 예측 가능한 스파이크라 오픈 전
+  미리 스케일업하고 HPA 는 미세조정 안전망으로. 워커는 KEDA 컨슈머 랙 스케일 권장.
+
 ### 다음 Phase 확장 계획
 
-- Phase 4: Docker Compose → Kubernetes(HPA / 스케줄 기반 스케일링) + Nginx Ingress.
 - Phase 5: Prometheus + Grafana 관측성.
 
 ## 왜 이렇게 설계했는가
@@ -173,7 +183,10 @@ python loadtest/e2e_booking.py --seat 5 --user 777             # 선점→확정
   - [x] 파티션 키 = `performance_id` (공연별 처리량 분산·순서 보장)
   - [x] 컨슈머 그룹 + 워커 수평 확장 (`--scale booking-worker=3`, 파티션 분배 확인)
   - [x] DB 반영 후 오프셋 커밋(at-least-once) + 멱등(ON CONFLICT) 재처리 안전
-- [ ] Phase 4: K8s
+- [x] **Phase 4: K8s** ✅ 매니페스트 + 설계 문서 (`k8s/`)
+  - [x] Deployment/Service/HPA (queue·booking·payment), StatefulSet(postgres·kafka)
+  - [x] Nginx Ingress 단일 진입점 + rate limiting
+  - [x] 스케줄 기반 스케일링(CronJob) 우선 + HPA 미세조정, 워커 KEDA 랙 스케일 설계
 - [ ] Phase 5: 관측성
 
 ## 트러블슈팅 로그

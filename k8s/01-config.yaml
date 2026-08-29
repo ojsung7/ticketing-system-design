@@ -1,0 +1,26 @@
+# 비밀이 아닌 설정은 ConfigMap, 민감정보는 Secret 으로 분리한다.
+# (실무에서는 Secret 을 sealed-secrets / External Secrets / Vault 로 관리)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ticketing-config
+  namespace: ticketing
+data:
+  REDIS_URL: "redis://redis:6379/0"
+  KAFKA_BOOTSTRAP: "kafka:9092"
+  ALLOWED_ENTRY_COUNT: "100"
+  SEAT_LOCK_TTL: "300"
+  CONFIRM_TOPIC: "booking-confirm"
+  CONFIRM_GROUP: "booking-confirmers"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ticketing-secret
+  namespace: ticketing
+type: Opaque
+stringData:
+  # 데모용 값. 실제 배포 시 반드시 교체하고 안전하게 주입할 것.
+  JWT_SECRET: "change-me-in-production"
+  DATABASE_URL: "postgresql://ticketing:ticketing@postgres:5432/ticketing"
+  POSTGRES_PASSWORD: "ticketing"

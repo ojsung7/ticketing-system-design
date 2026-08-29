@@ -1,0 +1,47 @@
+# booking-worker 는 Kafka 컨슈머 그룹의 멤버다.
+# - 파티션 수를 넘는 워커는 유휴 상태가 되므로, replicas 는 토픽 파티션 수 이하로 둔다.
+# - 스케일 기준은 CPU 가 아니라 '컨슈머 랙(lag)'이 적합하다 → 아래 KEDA 예시 참고.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: booking-worker
+  namespace: ticketing
+  labels: { app: booking-worker }
+spec:
+  replicas: 3                      # 토픽 파티션 수(6)에 맞춰 필요 시 증설
+  selector:
+    matchLabels: { app: booking-worker }
+  template:
+    metadata:
+      labels: { app: booking-worker }
+    spec:
+      containers:
+        - name: booking-worker
+          image: ghcr.io/ojsung7/ticketing-booking:latest   # booking 이미지 재사용
+          command: ["python", "-m", "services.booking.worker"]
+          envFrom:
+            - configMapRef: { name: ticketing-config }
+            - secretRef: { name: ticketing-secret }
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits: { cpu: "500m", memory: "256Mi" }
+---
+# [권장] KEDA 로 Kafka 컨슈머 랙 기반 오토스케일 (설치 시 활성화)
+# lagThreshold 를 넘으면 파티션 수까지 워커를 늘려 밀린 이벤트를 빠르게 소진한다.
+# apiVersion: keda.sh/v1alpha1
+# kind: ScaledObject
+# metadata:
+#   name: booking-worker
+#   namespace: ticketing
+# spec:
+#   scaleTargetRef:
+#     name: booking-worker
+#   minReplicaCount: 1
+#   maxReplicaCount: 6            # 토픽 파티션 수와 일치
+#   triggers:
+#     - type: kafka
+#       metadata:
+#         bootstrapServers: kafka:9092
+#         consumerGroup: booking-confirmers
+#         topic: booking-confirm
+#         lagThreshold: "100"
