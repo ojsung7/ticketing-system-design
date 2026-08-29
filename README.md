@@ -16,45 +16,51 @@ README에 그대로 남기는 것을 목표로 한다.
 
 ## 아키텍처
 
-### 현재 (Phase 2 — MSA 전환)
+### 현재 (Phase 3 — Kafka 메시징 고도화)
 
-3개 독립 서비스로 분리. **진입 토큰(JWT)은 공유 시크릿으로 각 서비스가 검증**하고,
-결제→예매 확정은 **이벤트 기반**(Redis Stream)으로 통신한다. Postgres 는 booking 만 소유.
+MSA 3개 서비스 + **결제→예매 확정을 Kafka 토픽으로 통신**. 파티션 키를 `performance_id`
+로 잡아 공연별로 처리량을 분산하고, **컨슈머 그룹**으로 워커를 수평 확장한다.
+Postgres 는 booking 만 소유.
 
 ```
                   ┌──────────────────┐
-        ┌────────►│ queue-service    │  대기열(Sorted Set) + JWT 발급
-        │  enter  │      :8001       │  (Redis 만)
+        ┌────────►│ queue-service    │  대기열(Sorted Set) + JWT 발급  (Redis)
+        │  enter  │      :8001       │
         │  status └──────────────────┘
  client │         ┌──────────────────┐         ┌──────────────────┐
         ├────────►│ booking-service  │◄── 락 ──►│ Redis            │
         │ reserve │      :8002       │         │ - waiting_queue   │
         │ (JWT)   └──────────────────┘         │ - seat:{id} 락    │
-        │         ┌──────────────────┐  xadd   │ - booking_confirm │
-        └────────►│ payment-service  │────────►│   _stream         │
-          confirm │      :8003       │         └────────┬─────────┘
-          (JWT)   └──────────────────┘            xread │
-                  ┌──────────────────┐◄────────────────┘
-                  │ booking-worker   │  이벤트 소비 → DB 반영(sold)
-                  └────────┬─────────┘
-                           ▼
-                  ┌──────────────────┐
-                  │ PostgreSQL       │  bookings / seat=sold (booking 소유)
-                  └──────────────────┘
+        │         ┌──────────────────┐         └──────────────────┘
+        └────────►│ payment-service  │  produce (key=performance_id)
+          confirm │      :8003       │────────┐
+          (JWT)   └──────────────────┘        ▼
+                     ┌───────────────────────────────────┐
+                     │ Kafka topic: booking-confirm       │
+                     │  part0   part1   part2  (공연별 분산) │
+                     └───┬────────┬────────┬──────────────┘
+              consumer   │        │        │   group=booking-confirmers
+                group  ┌─▼──┐   ┌─▼──┐   ┌─▼──┐
+                       │ w1 │   │ w2 │   │ w3 │  booking-worker × N (수평 확장)
+                       └─┬──┘   └─┬──┘   └─┬──┘
+                         └────────┼────────┘
+                                  ▼
+                       ┌──────────────────┐
+                       │ PostgreSQL       │  bookings / seat=sold (booking 소유)
+                       └──────────────────┘
 ```
 
 - **queue-service** (`:8001`): 대기열 + TTL JWT 발급. Redis 만 사용.
 - **booking-service** (`:8002`): 좌석 조회·선점(Redis 원자 락). Postgres 소유. JWT 필수.
-- **payment-service** (`:8003`): 결제 확정 → `booking_confirm_stream` 이벤트 발행. DB 미접근.
-- **booking-worker**: 확정 이벤트를 소비해 DB 반영(백프레셔·멱등). booking 이미지 재사용.
-- **공유 코드**(`common/`): 설정·Redis/DB 클라이언트·JWT. 서비스 간 토큰 검증은 동일 `JWT_SECRET`.
+- **payment-service** (`:8003`): 결제 확정 → Kafka `booking-confirm` 토픽에 발행(key=performance_id).
+- **booking-worker**: Kafka 컨슈머 그룹으로 소비 → DB 반영. `--scale booking-worker=N` 으로 확장.
+- **공유 코드**(`common/`): 설정·Redis/DB/Kafka 클라이언트·JWT. 서비스 간 토큰 검증은 동일 `JWT_SECRET`.
 
 예매 흐름: `queue/enter` → `queue/status`(앞쪽 N명이면 JWT 발급) → **booking** `reserve`(락)
-→ **payment** `payments/confirm`(이벤트 발행, 202) → **booking-worker**(DB 반영, `sold`).
+→ **payment** `payments/confirm`(Kafka 발행, 202) → **booking-worker**(컨슈머 그룹, DB 반영 `sold`).
 
 ### 다음 Phase 확장 계획
 
-- Phase 3: Redis Stream → Kafka(파티셔닝·컨슈머 그룹).
 - Phase 4: Docker Compose → Kubernetes(HPA / 스케줄 기반 스케일링) + Nginx Ingress.
 - Phase 5: Prometheus + Grafana 관측성.
 
@@ -66,20 +72,32 @@ README에 그대로 남기는 것을 목표로 한다.
 - **Lua script 원자적 락**: `GET` 후 `SET`을 따로 호출하면 두 요청이 동시에 빈 좌석을
   보고 둘 다 선점하는 race condition이 생긴다. → *(Phase 1에서 재현→해결, 아래 부하테스트 참고)*
 - **큐 기반 비동기 확정**: 결제 서비스는 DB에 직접 쓰지 않고 이벤트만 발행한다. 트래픽이 튀어도
-  Stream에 쌓였다가 워커가 서서히 처리 → DB는 항상 감당 가능한 속도로만 요청을 받는다.
+  큐에 쌓였다가 워커가 서서히 처리 → DB는 항상 감당 가능한 속도로만 요청을 받는다.
 - **서비스 분리 & 데이터 소유권**: booking 만 Postgres 를 소유하고, payment 는 이벤트로
   확정을 요청한다. 서비스가 DB 를 공유하지 않아 결합도를 낮추고 독립 배포·확장이 가능하다.
+- **Kafka 파티셔닝 & 컨슈머 그룹**(Phase 3): 확정 이벤트를 `performance_id` 키로 파티셔닝해
+  공연별 처리량을 분산하고 같은 공연 내 순서를 보장한다. 컨슈머 그룹으로 워커를 N개까지
+  늘리면 파티션이 워커에 분배돼 수평 확장된다. 오프셋은 DB 반영 후 커밋(at-least-once) +
+  `ON CONFLICT DO NOTHING` 멱등 처리로 재처리·리밸런싱에도 중복 예매가 생기지 않는다.
+  (왜 Redis Stream 에서 넘어왔나: 파티션 단위 병렬성·컨슈머 그룹 리밸런싱·오프셋 관리 등
+   대규모 이벤트 처리에 필요한 기능이 Kafka 에 갖춰져 있기 때문.)
 
 ## 실행 방법
 
 ```bash
 docker-compose up --build
+
+# 컨슈머 그룹 수평 확장(워커 3개 = 토픽 파티션 3개):
+docker-compose up -d --scale booking-worker=3
 ```
 
-- 서비스: queue `:8001`, booking `:8002`, payment `:8003` (+ booking-worker, postgres, redis)
+- 서비스: queue `:8001`, booking `:8002`, payment `:8003`
+  (+ booking-worker, postgres, redis, **kafka**)
 - Swagger: 각 서비스 `/docs` (예: http://localhost:8002/docs)
 - 헬스체크: `GET :8001/health`, `:8002/health`, `:8003/health`
 - 환경변수는 `.env.example` 참고. `JWT_SECRET` 은 세 서비스가 동일해야 함(compose 에서 공유).
+- 파티셔닝 시연: `python loadtest/kafka_partition_demo.py` 후
+  `docker-compose logs booking-worker` 로 공연별 파티션·워커 분배 확인.
 
 주요 API (서비스별):
 
@@ -89,7 +107,7 @@ docker-compose up --build
 | queue `:8001` | GET | `/queue/status?user_id=1` | 순번 조회. 입장 가능 시 `entry_token` 발급 |
 | booking `:8002` | GET | `/performances/{id}/seats` | 좌석 목록/상태 조회 |
 | booking `:8002` | POST | `/seats/{id}/reserve` | 좌석 선점(Redis 원자 락) — **토큰 필요** |
-| payment `:8003` | POST | `/payments/confirm` | 결제 확정(이벤트 발행, 202) — **토큰 필요**, `{"user_id":1,"seat_id":5}` |
+| payment `:8003` | POST | `/payments/confirm` | 결제 확정(Kafka 발행, 202) — **토큰 필요**, `{"user_id":1,"seat_id":5,"performance_id":1}` |
 
 > `reserve`/`payments/confirm` 은 `Authorization: Bearer <entry_token>` 헤더가 있어야 진입 가능(대기열 게이트).
 
@@ -150,7 +168,11 @@ python loadtest/e2e_booking.py --seat 5 --user 777             # 선점→확정
   - [x] queue / booking / payment 서비스 분리 (독립 FastAPI + Dockerfile)
   - [x] 공유 시크릿 JWT 로 서비스 간 토큰 검증
   - [x] payment → booking 확정을 Redis Stream 이벤트로 통신(데이터 소유권 분리)
-- [ ] Phase 3: Kafka
+- [x] **Phase 3: Kafka** ✅ 완료
+  - [x] Redis Stream → Kafka 토픽(`booking-confirm`) 교체 (aiokafka)
+  - [x] 파티션 키 = `performance_id` (공연별 처리량 분산·순서 보장)
+  - [x] 컨슈머 그룹 + 워커 수평 확장 (`--scale booking-worker=3`, 파티션 분배 확인)
+  - [x] DB 반영 후 오프셋 커밋(at-least-once) + 멱등(ON CONFLICT) 재처리 안전
 - [ ] Phase 4: K8s
 - [ ] Phase 5: 관측성
 
@@ -173,3 +195,20 @@ python loadtest/e2e_booking.py --seat 5 --user 777             # 선점→확정
   선점 키에는 TTL 을 걸어 결제 미완료 시 자동 해제되게 했다.
 - **결과**: 동일 조건(30 동시 요청)에서 **1건만 성공, 29건 409 거절, 중복 0**.
   DB 에는 defense-in-depth 로 `bookings(seat_id)` unique 인덱스도 복원해 최후 방어선을 뒀다.
+
+### #2 Kafka 컨슈머 그룹 초기화 경쟁 (`GroupCoordinatorNotAvailableError`)
+
+- **증상**: 워커 기동 직후 로그에 `Group Coordinator Request failed: [Error 15]
+  GroupCoordinatorNotAvailableError` 가 잠깐 찍힌 뒤 정상 소비로 넘어감.
+- **원인**: 브로커는 떠 있지만 컨슈머 그룹 오프셋을 저장하는 내부 토픽
+  (`__consumer_offsets`)이 아직 생성/리더 선출 전이라, 그룹 코디네이터가 잠시 불가.
+- **해결**: 워커의 `consumer.start()` 를 재시도 루프로 감싸고, compose 의 kafka
+  healthcheck(`start_period`)로 브로커 준비를 기다리게 했다. 일시적 경고이며 재처리는
+  멱등 처리로 안전. 운영에서는 오프셋 토픽 복제본/ISR 설정으로 코디네이터 가용성을 높인다.
+
+### #3 파티셔닝 검증 (performance_id 키)
+
+- **관찰**: 공연 1/2/3 확정 이벤트가 각각 파티션 p0/p2/p2 로 갈리고, 컨슈머 그룹의
+  워커 3개 중 서로 다른 워커가 파티션을 나눠 처리함(`docker-compose logs booking-worker`).
+- **의미**: 같은 공연은 항상 같은 파티션(순서 보장), 공연이 늘면 파티션에 분산되어
+  워커 수를 늘리는 만큼 병렬 처리량이 확장됨을 확인.
