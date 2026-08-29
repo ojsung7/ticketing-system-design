@@ -29,13 +29,27 @@ CREATE TABLE IF NOT EXISTS bookings (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_bookings_seat ON bookings(seat_id);
 
 -- ── 시드 데이터 ────────────────────────────────────────────────
+-- 공연 3개: performance_id 를 Kafka 파티션 키로 써서 공연별 처리량 분산을 학습한다.
 INSERT INTO performances (name, show_time)
-VALUES ('데모 콘서트 2026', '2026-12-31 20:00:00')
+VALUES
+    ('데모 콘서트 2026', '2026-12-31 20:00:00'),
+    ('데모 뮤지컬 2026', '2026-11-15 19:30:00'),
+    ('데모 페스티벌 2026', '2026-10-01 18:00:00')
 ON CONFLICT DO NOTHING;
 
--- 공연 1번에 좌석 1000개 (A1 ~ A1000). 부하테스트에서 좌석 고갈로 인한
--- 409 노이즈를 줄이고 backend 처리량/지연을 측정하기 위해 넉넉히 시드한다.
+-- 공연 1번: 좌석 1000개 (부하테스트용, 좌석 고갈로 인한 409 노이즈 최소화).
 INSERT INTO seats (performance_id, seat_number, status)
 SELECT 1, 'A' || g, 'available'
 FROM generate_series(1, 1000) AS g
 WHERE NOT EXISTS (SELECT 1 FROM seats WHERE performance_id = 1);
+
+-- 공연 2, 3번: 각 200석 (파티셔닝 시연용).
+INSERT INTO seats (performance_id, seat_number, status)
+SELECT 2, 'B' || g, 'available'
+FROM generate_series(1, 200) AS g
+WHERE NOT EXISTS (SELECT 1 FROM seats WHERE performance_id = 2);
+
+INSERT INTO seats (performance_id, seat_number, status)
+SELECT 3, 'C' || g, 'available'
+FROM generate_series(1, 200) AS g
+WHERE NOT EXISTS (SELECT 1 FROM seats WHERE performance_id = 3);

@@ -10,6 +10,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     database_url: str = "postgresql://ticketing:ticketing@localhost:5432/ticketing"
     redis_url: str = "redis://localhost:6379/0"
+    kafka_bootstrap: str = "localhost:9092"
+
+    # 결제 확정 이벤트 토픽 (파티션 키 = performance_id)
+    confirm_topic: str = "booking-confirm"
+    confirm_group: str = "booking-confirmers"
 
     seat_lock_ttl: int = 300
     allowed_entry_count: int = 100

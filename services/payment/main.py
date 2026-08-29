@@ -1,27 +1,38 @@
-"""payment-service — 결제 확정 -> 이벤트 발행.
+"""payment-service — 결제 확정 -> Kafka 이벤트 발행.
 
-결제가 끝나면 booking_confirm_stream(Redis Stream)에 확정 이벤트를 발행하고 즉시 응답한다.
-payment-service 는 booking DB 를 직접 건드리지 않는다. 실제 예매 확정은 booking-service
-의 worker 가 이벤트를 소비해 수행한다(서비스 간 이벤트 기반 통신 + 데이터 소유권 분리).
+Phase 3: Redis Stream 대신 Kafka 토픽(booking-confirm)에 확정 이벤트를 발행한다.
+파티션 키를 performance_id 로 잡아 공연별로 처리량을 분산하고, 같은 공연의 이벤트는
+같은 파티션으로 가서 순서가 보장된다.
 
-(실제 PG 연동은 이 프로젝트 범위 밖. 여기서는 '결제 성공'을 가정하고 확정 이벤트만 낸다.)
+payment 는 booking DB 를 직접 건드리지 않는다. 실제 예매 확정은 booking-service 의
+worker(컨슈머 그룹)가 토픽을 소비해 수행한다.
 """
 
+import json
 from contextlib import asynccontextmanager
 
+from aiokafka import AIOKafkaProducer
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 
 from common.auth import require_entry_token
 from common.clients import connect_redis, disconnect, get_redis
+from common.config import settings
 
-STREAM = "booking_confirm_stream"
+producer: AIOKafkaProducer | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global producer
     await connect_redis()
+    producer = AIOKafkaProducer(
+        bootstrap_servers=settings.kafka_bootstrap,
+        enable_idempotence=True,  # 중복 발행 방지
+    )
+    await producer.start()
     yield
+    await producer.stop()
     await disconnect()
 
 
@@ -31,6 +42,7 @@ app = FastAPI(title="payment-service", lifespan=lifespan)
 class ConfirmRequest(BaseModel):
     user_id: int
     seat_id: int
+    performance_id: int = 1  # 파티션 키
 
 
 @app.get("/health")
@@ -39,7 +51,7 @@ async def health():
         ok = await get_redis().ping()
     except Exception:
         ok = False
-    return {"service": "payment", "redis": ok}
+    return {"service": "payment", "redis": ok, "kafka": producer is not None}
 
 
 @app.post("/payments/confirm", status_code=202)
@@ -51,15 +63,20 @@ async def confirm_payment(
         raise HTTPException(status_code=403, detail="토큰의 사용자와 요청 사용자가 다릅니다.")
     redis = get_redis()
 
-    # 좌석 선점자가 요청자 본인인지 확인(선점 만료/타인 선점 방어).
     holder = await redis.get(f"seat:{req.seat_id}")
     if holder is None:
         raise HTTPException(status_code=410, detail="선점이 만료되었습니다. 다시 시도하세요.")
     if holder != str(req.user_id):
         raise HTTPException(status_code=409, detail="다른 사용자가 선점한 좌석입니다.")
 
-    # 결제 성공 가정 -> 확정 이벤트 발행 후 즉시 응답(비동기 확정).
-    await redis.xadd(
-        STREAM, {"seat_id": str(req.seat_id), "user_id": str(req.user_id)}
+    # 결제 성공 가정 -> Kafka 로 확정 이벤트 발행 (key=performance_id 로 파티셔닝).
+    assert producer is not None
+    value = json.dumps(
+        {"seat_id": req.seat_id, "user_id": req.user_id, "performance_id": req.performance_id}
+    ).encode()
+    await producer.send_and_wait(
+        settings.confirm_topic,
+        value=value,
+        key=str(req.performance_id).encode(),
     )
     return {"seat_id": req.seat_id, "user_id": req.user_id, "status": "confirming"}
