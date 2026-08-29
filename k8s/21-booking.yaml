@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: booking
+  namespace: ticketing
+  labels: { app: booking }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: booking }
+  template:
+    metadata:
+      labels: { app: booking }
+    spec:
+      containers:
+        - name: booking
+          image: ghcr.io/ojsung7/ticketing-booking:latest
+          ports:
+            - containerPort: 8002
+          envFrom:
+            - configMapRef: { name: ticketing-config }
+            - secretRef: { name: ticketing-secret }
+          readinessProbe:
+            httpGet: { path: /health, port: 8002 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: 8002 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests: { cpu: "200m", memory: "256Mi" }
+            limits: { cpu: "1000m", memory: "512Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: booking
+  namespace: ticketing
+spec:
+  selector: { app: booking }
+  ports:
+    - port: 8002
+      targetPort: 8002
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: booking
+  namespace: ticketing
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: booking
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60

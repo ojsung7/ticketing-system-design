@@ -1,0 +1,89 @@
+# [핵심] 티켓 오픈은 '예측 가능한' 스파이크다. 반응형 HPA 는 부하가 오른 뒤에야
+# 늘어나 초기 몇 초를 놓치기 쉽다. 그래서 오픈 시각 '전에' 미리 스케일업하고,
+# 끝난 뒤 스케일다운하는 스케줄 기반 스케일링을 우선한다. (HPA 는 그 위에서 미세조정)
+#
+# 아래 CronJob 은 kubectl 로 Deployment replicas 를 조정한다. 이를 위한 최소 권한 RBAC 포함.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: scaler
+  namespace: ticketing
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployment-scaler
+  namespace: ticketing
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: scaler-binding
+  namespace: ticketing
+subjects:
+  - kind: ServiceAccount
+    name: scaler
+    namespace: ticketing
+roleRef:
+  kind: Role
+  name: deployment-scaler
+  apiGroup: rbac.authorization.k8s.io
+---
+# 오픈 10분 전 스케일업 (예: 매일 19:50 KST 오픈이면 아래 스케줄)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scale-up-before-open
+  namespace: ticketing
+spec:
+  schedule: "50 19 * * *"
+  timeZone: "Asia/Seoul"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: scaler
+          restartPolicy: OnFailure
+          containers:
+            - name: kubectl
+              image: bitnami/kubectl:1.30
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  kubectl -n ticketing scale deploy/queue --replicas=10
+                  kubectl -n ticketing scale deploy/booking --replicas=20
+                  kubectl -n ticketing scale deploy/payment --replicas=10
+                  kubectl -n ticketing scale deploy/booking-worker --replicas=6
+---
+# 오픈 러시 종료 후 스케일다운 (예: 21:00 KST)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scale-down-after-open
+  namespace: ticketing
+spec:
+  schedule: "0 21 * * *"
+  timeZone: "Asia/Seoul"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: scaler
+          restartPolicy: OnFailure
+          containers:
+            - name: kubectl
+              image: bitnami/kubectl:1.30
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  kubectl -n ticketing scale deploy/queue --replicas=2
+                  kubectl -n ticketing scale deploy/booking --replicas=3
+                  kubectl -n ticketing scale deploy/payment --replicas=2
+                  kubectl -n ticketing scale deploy/booking-worker --replicas=3

@@ -1,0 +1,39 @@
+# 모든 외부 트래픽의 단일 진입점. 경로별로 서비스에 라우팅하고,
+# Ingress 레벨에서 rate limiting 을 걸어 대기열 앞단에서 한 번 더 트래픽을 조인다.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ticketing
+  namespace: ticketing
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$1
+    # ── Rate limiting (nginx ingress) ──────────────────────
+    # 클라이언트(IP)당 초당 요청 수 / 동시 연결 수 제한
+    nginx.ingress.kubernetes.io/limit-rps: "20"
+    nginx.ingress.kubernetes.io/limit-connections: "10"
+    # 순간 버스트 허용 배수
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: "3"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: ticketing.local
+      http:
+        paths:
+          - path: /(queue.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: queue
+                port: { number: 8001 }
+          - path: /(performances.*|seats.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: booking
+                port: { number: 8002 }
+          - path: /(payments.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: payment
+                port: { number: 8003 }
