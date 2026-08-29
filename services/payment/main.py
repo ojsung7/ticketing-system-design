@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from common.auth import require_entry_token
 from common.clients import connect_redis, disconnect, get_redis
 from common.config import settings
+from common.metrics import payment_confirm_published_total, setup_metrics
 
 producer: AIOKafkaProducer | None = None
 
@@ -37,6 +38,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="payment-service", lifespan=lifespan)
+setup_metrics(app)
 
 
 class ConfirmRequest(BaseModel):
@@ -79,4 +81,5 @@ async def confirm_payment(
         value=value,
         key=str(req.performance_id).encode(),
     )
+    payment_confirm_published_total.inc()
     return {"seat_id": req.seat_id, "user_id": req.user_id, "status": "confirming"}
