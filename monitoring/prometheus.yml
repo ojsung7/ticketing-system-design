@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: queue
+    static_configs:
+      - targets: ["queue:8001"]
+  - job_name: booking
+    static_configs:
+      - targets: ["booking:8002"]
+  - job_name: payment
+    static_configs:
+      - targets: ["payment:8003"]
+  - job_name: booking-worker
+    # 워커를 여러 개로 스케일하면 DNS 서비스 디스커버리로 바꾸는 게 정석.
+    # 데모에서는 단일 타깃으로 스크레이프한다.
+    static_configs:
+      - targets: ["booking-worker:8009"]

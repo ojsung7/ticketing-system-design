@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from common.auth import require_entry_token
 from common.clients import connect_db, connect_redis, disconnect, get_db, get_redis
 from common.config import settings
+from common.metrics import seat_reserve_total, setup_metrics
 
 # GET 이 nil 일 때만 SET -> 원자적 좌석 선점. Redis 단일 스레드에서 통째로 실행된다.
 SEAT_LOCK_SCRIPT = """
@@ -34,6 +35,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="booking-service", lifespan=lifespan)
+setup_metrics(app)
 
 
 class ReserveRequest(BaseModel):
@@ -87,6 +89,7 @@ async def reserve_seat(
     if seat is None:
         raise HTTPException(status_code=404, detail="좌석이 없습니다.")
     if seat["status"] != "available":
+        seat_reserve_total.labels(result="conflict").inc()
         raise HTTPException(status_code=409, detail="이미 판매된 좌석입니다.")
 
     acquired = await redis.eval(
@@ -97,8 +100,10 @@ async def reserve_seat(
         str(settings.seat_lock_ttl),
     )
     if acquired == 0:
+        seat_reserve_total.labels(result="conflict").inc()
         raise HTTPException(status_code=409, detail="이미 선점된 좌석입니다.")
 
+    seat_reserve_total.labels(result="success").inc()
     return {
         "seat_id": seat_id,
         "user_id": req.user_id,

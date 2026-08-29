@@ -15,9 +15,13 @@ import os
 import socket
 
 from aiokafka import AIOKafkaConsumer
+from prometheus_client import start_http_server
 
 from common.clients import connect_db, connect_redis, disconnect, get_db, get_redis
 from common.config import settings
+from common.metrics import booking_confirmed_total
+
+METRICS_PORT = 8009
 
 WORKER_ID = os.getenv("HOSTNAME", socket.gethostname())
 
@@ -35,6 +39,7 @@ async def process(seat_id: int, user_id: int, performance_id: int, partition: in
     )
     await pool.execute("UPDATE seats SET status = 'sold' WHERE id = $1", seat_id)
     await redis.delete(f"seat:{seat_id}")
+    booking_confirmed_total.inc()
     print(
         f"[worker {WORKER_ID}] p{partition} 확정 seat={seat_id} "
         f"user={user_id} perf={performance_id}",
@@ -45,6 +50,8 @@ async def process(seat_id: int, user_id: int, performance_id: int, partition: in
 async def main() -> None:
     await connect_redis()
     await connect_db()
+    start_http_server(METRICS_PORT)  # Prometheus 스크레이프용 /metrics
+    print(f"[worker {WORKER_ID}] metrics on :{METRICS_PORT}", flush=True)
 
     consumer = AIOKafkaConsumer(
         settings.confirm_topic,

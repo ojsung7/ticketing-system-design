@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from common.auth import create_entry_token
 from common.clients import connect_redis, disconnect, get_redis
 from common.config import settings
+from common.metrics import setup_metrics, waiting_queue_size
 
 QUEUE_KEY = "waiting_queue"
 
@@ -25,6 +26,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="queue-service", lifespan=lifespan)
+setup_metrics(app)
 
 
 class QueueRequest(BaseModel):
@@ -47,6 +49,7 @@ async def enter_queue(req: QueueRequest):
     await redis.zadd(QUEUE_KEY, {member: time.time()}, nx=True)
     rank = await redis.zrank(QUEUE_KEY, member)
     total = await redis.zcard(QUEUE_KEY)
+    waiting_queue_size.set(total)
     return {
         "user_id": req.user_id,
         "rank": rank,
@@ -66,6 +69,7 @@ async def queue_status(user_id: int):
 
     if rank < settings.allowed_entry_count:
         await redis.zrem(QUEUE_KEY, member)
+        waiting_queue_size.set(await redis.zcard(QUEUE_KEY))
         token = create_entry_token(user_id)
         return {
             "user_id": user_id,

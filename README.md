@@ -16,11 +16,11 @@ README에 그대로 남기는 것을 목표로 한다.
 
 ## 아키텍처
 
-### 현재 (Phase 3 — Kafka 메시징 고도화)
+### 런타임 아키텍처 (Phase 1~3 구현, compose 로 실동작)
 
 MSA 3개 서비스 + **결제→예매 확정을 Kafka 토픽으로 통신**. 파티션 키를 `performance_id`
 로 잡아 공연별로 처리량을 분산하고, **컨슈머 그룹**으로 워커를 수평 확장한다.
-Postgres 는 booking 만 소유.
+Postgres 는 booking 만 소유. (배포는 Phase 4 K8s, 관측성은 Phase 5 참고)
 
 ```
                   ┌──────────────────┐
@@ -70,9 +70,21 @@ Postgres 는 booking 만 소유.
 - **스케줄 기반 스케일링** 우선(CronJob): 티켓 오픈은 예측 가능한 스파이크라 오픈 전
   미리 스케일업하고 HPA 는 미세조정 안전망으로. 워커는 KEDA 컨슈머 랙 스케일 권장.
 
-### 다음 Phase 확장 계획
+### Phase 5 — 관측성 (Prometheus + Grafana)
 
-- Phase 5: Prometheus + Grafana 관측성.
+세 서비스와 worker 를 Prometheus 로 계측하고 Grafana 대시보드로 시각화한다.
+코어 스택은 가볍게 유지하고 모니터링은 오버레이로 필요할 때만 함께 띄운다(`monitoring/`).
+
+```bash
+docker-compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
+# Prometheus  http://localhost:9090   /  Grafana http://localhost:3300 (admin/admin)
+```
+
+- 각 서비스 `/metrics` 노출(prometheus-fastapi-instrumentator) + 도메인 커스텀 메트릭:
+  `ticketing_waiting_queue_size`(대기열 적체), `ticketing_seat_reserve_total{result}`,
+  `ticketing_payment_confirm_published_total`, `ticketing_booking_confirmed_total`.
+- Grafana 대시보드(자동 프로비저닝): TPS·상태별 응답율·p95 지연·대기열 적체·좌석 선점
+  성공/충돌·확정 파이프라인(발행 vs 소비 gap = 적체).
 
 ## 왜 이렇게 설계했는가
 
@@ -187,7 +199,10 @@ python loadtest/e2e_booking.py --seat 5 --user 777             # 선점→확정
   - [x] Deployment/Service/HPA (queue·booking·payment), StatefulSet(postgres·kafka)
   - [x] Nginx Ingress 단일 진입점 + rate limiting
   - [x] 스케줄 기반 스케일링(CronJob) 우선 + HPA 미세조정, 워커 KEDA 랙 스케일 설계
-- [ ] Phase 5: 관측성
+- [x] **Phase 5: 관측성** ✅ Prometheus 계측 + Grafana 대시보드
+  - [x] 3서비스 + worker `/metrics` (HTTP 메트릭 + 도메인 커스텀 메트릭)
+  - [x] Prometheus 스크레이프(4 타깃 up) + Grafana 자동 프로비저닝 대시보드
+  - [x] 대기열 적체·선점 성공/충돌·확정 발행/소비 gap 가시화
 
 ## 트러블슈팅 로그
 
